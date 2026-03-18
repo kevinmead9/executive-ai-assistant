@@ -1,7 +1,11 @@
 import yaml
 from pathlib import Path
 
-_ROOT = Path(__file__).absolute().parent
+_CONFIG_PATH = Path(__file__).parent / "config.yaml"
+
+# Pre-load config at import time to avoid blocking I/O in async context
+with open(_CONFIG_PATH) as _stream:
+    _DEFAULT_CONFIG = yaml.safe_load(_stream)
 
 
 def get_config(config: dict):
@@ -11,5 +15,4 @@ def get_config(config: dict):
     if "email" in config["configurable"]:
         return config["configurable"]
     else:
-        with open(_ROOT.joinpath("config.yaml")) as stream:
-            return yaml.safe_load(stream)
+        return _DEFAULT_CONFIG

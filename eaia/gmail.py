@@ -7,13 +7,14 @@ import os
 import json
 
 from dateutil import parser
+from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
+from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 import base64
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 import email.utils
-from langchain_auth import Client
 
 from langchain_core.tools import tool
 from langchain_core.pydantic_v1 import BaseModel, Field
@@ -25,6 +26,45 @@ _SCOPES = [
     "https://www.googleapis.com/auth/gmail.modify",
     "https://www.googleapis.com/auth/calendar",
 ]
+_ROOT = Path(__file__).parent.absolute()
+_PORT = 54191
+_SECRETS_DIR = _ROOT / ".secrets"
+_SECRETS_PATH = str(_SECRETS_DIR / "secrets.json")
+_TOKEN_PATH = str(_SECRETS_DIR / "token.json")
+
+
+def get_credentials_local(
+    gmail_token: str | None = None, gmail_secret: str | None = None
+) -> Credentials:
+    """Get credentials using local OAuth flow (no LangSmith dependency)."""
+    creds = None
+    _SECRETS_DIR.mkdir(parents=True, exist_ok=True)
+    gmail_token = gmail_token or os.getenv("GMAIL_TOKEN")
+    if gmail_token:
+        with open(_TOKEN_PATH, "w") as token:
+            token.write(gmail_token)
+    gmail_secret = gmail_secret or os.getenv("GMAIL_SECRET")
+    if gmail_secret:
+        with open(_SECRETS_PATH, "w") as secret:
+            secret.write(gmail_secret)
+    if os.path.exists(_TOKEN_PATH):
+        creds = Credentials.from_authorized_user_file(_TOKEN_PATH)
+
+    if not creds or not creds.valid or not creds.has_scopes(_SCOPES):
+        if (
+            creds
+            and creds.expired
+            and creds.refresh_token
+            and creds.has_scopes(_SCOPES)
+        ):
+            creds.refresh(Request())
+        else:
+            flow = InstalledAppFlow.from_client_secrets_file(_SECRETS_PATH, _SCOPES)
+            creds = flow.run_local_server(port=_PORT, redirect_uri_trailing_slash=False)
+        with open(_TOKEN_PATH, "w") as token:
+            token.write(creds.to_json())
+
+    return creds
 
 
 async def get_credentials(
@@ -40,10 +80,12 @@ async def get_credentials(
     Returns:
         Google OAuth2 credentials
     """
+    # Use local auth if USE_LOCAL_AUTH is set or LANGSMITH_API_KEY is missing
+    if os.getenv("USE_LOCAL_AUTH") or not (langsmith_api_key or os.getenv("LANGSMITH_API_KEY")):
+        return get_credentials_local()
+
     api_key = langsmith_api_key or os.getenv("LANGSMITH_API_KEY")
-    if not api_key:
-        raise ValueError("LANGSMITH_API_KEY environment variable must be set")
-    
+    from langchain_auth import Client
     client = Client(api_key=api_key)
     
     try:
@@ -54,10 +96,12 @@ async def get_credentials(
             user_id=user_email
         )
         
-        if auth_result.needs_auth:
-            print(f"Please visit: {auth_result.auth_url}")
+        if auth_result.token:
+            token = auth_result.token
+        elif auth_result.url:
+            print(f"Please visit: {auth_result.url}")
             print("Complete the OAuth flow and then retry.")
-            
+
             # Wait for completion outside of LangGraph context
             completed_result = await client.wait_for_completion(
                 auth_id=auth_result.auth_id,
@@ -65,7 +109,7 @@ async def get_credentials(
             )
             token = completed_result.token
         else:
-            token = auth_result.token
+            raise ValueError("Auth result has neither token nor auth URL")
         
         if not token:
             raise ValueError("Failed to obtain access token")
